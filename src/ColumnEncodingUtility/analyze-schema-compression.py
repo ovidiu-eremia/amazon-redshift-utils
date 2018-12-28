@@ -790,23 +790,23 @@ def analyze(table_info):
 
                 # insert the old data into the new table
                 # if we have identity column(s), we can't insert data from them, so do selective insert
-                if has_identity:
+                if has_identity or 1==1:
                     source_columns = ', '.join(non_identity_columns)
-                    mig_columns = '(' + source_columns + ')'
+                    mig_columns = '(\n' + source_columns + '\n)'
                 else:
                     source_columns = '*'
                     mig_columns = ''
 
-                insert = 'insert into %s."%s" %s select %s from %s."%s"' % (set_target_schema,
+                insert = 'insert into %s."%s" %s\nselect\n%s\nfrom %s."%s"' % (set_target_schema,
                                                                             target_table,
                                                                             mig_columns,
                                                                             source_columns,
                                                                             schema_name,
                                                                             table_name)
                 if len(table_sortkeys) > 0:
-                    insert = "%s order by \"%s\";" % (insert, ",".join(table_sortkeys).replace(',', '\",\"'))
+                    insert = "%s order by \"%s\"\n;" % (insert, ",".join(table_sortkeys).replace(',', '\",\"'))
                 else:
-                    insert = "%s;" % (insert)
+                    insert = "%s\n;" % (insert)
 
                 statements.extend([insert])
 
