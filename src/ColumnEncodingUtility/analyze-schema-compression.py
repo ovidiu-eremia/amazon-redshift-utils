@@ -612,8 +612,8 @@ def analyze(table_info):
             else:
                 target_table = table_name
 
-            create_table = 'begin;\nlock table %s."%s";\ncreate table %s."%s"(' % (
-                schema_name, table_name, set_target_schema, target_table,)
+            create_table = 'begin;\ncreate table %s."%s"(' % (
+                set_target_schema, target_table,)
 
             # query the table column definition
             descr = get_table_desc(schema_name, table_name)
