@@ -334,7 +334,7 @@ def get_foreign_keys(schema_name, set_target_schema, table_name):
         has_fks = True
         references_clause = fk[1].replace('REFERENCES ', 'REFERENCES %s.' % set_target_schema)
         fk_statements.append(
-            'alter table %s."%s" add constraint %s %s;' % (set_target_schema, table_name, fk[0], references_clause))
+            'alter table %s.%s add constraint %s %s;' % (set_target_schema, table_name, fk[0], references_clause))
 
     if has_fks:
         return fk_statements
@@ -343,19 +343,20 @@ def get_foreign_keys(schema_name, set_target_schema, table_name):
 
 
 def get_primary_key(schema_name, set_target_schema, original_table, new_table):
-    pk_statement = 'alter table %s."%s" add primary key (' % (set_target_schema, new_table)
+    pk_statement = 'alter table %s.%s add primary key (' % (set_target_schema, new_table)
     has_pks = False
 
     # get the primary key columns
-    statement = '''SELECT /* fetch primary key information */   
-  att.attname
+    statement = '''SELECT /* fetch primary key information */
+  quote_ident(att.attname)
 FROM pg_index ind, pg_class cl, pg_attribute att
-WHERE 
-  cl.oid = '%s."%s"'::regclass 
-  AND ind.indrelid = cl.oid 
+WHERE
+  cl.oid = '%s."%s"'::regclass
+  AND ind.indrelid = cl.oid
   AND att.attrelid = cl.oid
   and att.attnum = ANY(ind.indkey)
   and attnum > 0
+  and not att.attisdropped
   AND ind.indisprimary
 order by att.attnum;
 ''' % (schema_name, original_table)
@@ -363,7 +364,7 @@ order by att.attnum;
     if debug:
         comment(statement)
 
-        pks = execute_query(statement)
+    pks = execute_query(statement)
 
     for pk in pks:
         has_pks = True
@@ -381,16 +382,19 @@ def get_table_desc(schema_name, table_name):
     # get the table definition from the dictionary so that we can get relevant details for each column
     statement = '''
 select /* fetching column descriptions for table */
-  attname as "column", t.typname as type
+  quote_ident(attname) as "column"
+  , pg_catalog.format_type(at.atttypid, at.atttypmod) as "type"
   , 'zstd' as encoding, 'f' as distkey, 0 as sortkey, attnotnull as "notnull", ad.adsrc
+  , t.typcategory
 from pg_attribute at
   left join pg_attrdef ad on (at.attrelid, at.attnum) = (ad.adrelid, ad.adnum)
-  left join pg_type t on t.oid = at.atttypid
   left join pg_class c on c.oid = at.attrelid
+  left join pg_type t on t.oid = at.atttypid
   left join pg_index i on i.indrelid = at.attrelid
     and at.attnum = any(i.indkey) and i.indisprimary
 where at.attrelid = '%s."%s"'::regclass
   and at.attnum > 0
+  and not at.attisdropped
 order by at.attnum;
 ''' % (schema_name, table_name)
 
@@ -411,10 +415,10 @@ order by at.attnum;
 def get_count_raw_columns(schema_name, table_name):
     # count the number of raw encoded columns which are not the sortkey, from the dictionary
     statement = '''select 0 /* getting count of raw columns in table count(9) count_raw_columns
-      from pg_table_def 
+      from pg_table_def
       where schemaname = '%s'
-        and lower(encoding) in ('raw','none') 
-        and sortkey != 1        
+        and lower(encoding) in ('raw','none')
+        and sortkey != 1
         and tablename = '%s' */
 ''' % (schema_name, table_name)
 
@@ -574,7 +578,7 @@ def analyze(table_info):
 
         statement = '''
 select /* fetching column descriptions for table */
-  c.relname as "Table", attname as "Column"
+  c.relname as "Table", quote_ident(attname) as "Column"
   , 'zstd' as "Encoding", 0.00 as "Est_reduction_pct"
 from pg_attribute at
   left join pg_attrdef ad on (at.attrelid, at.attnum) = (ad.adrelid, ad.adnum)
@@ -584,6 +588,7 @@ from pg_attribute at
     and at.attnum = any(i.indkey) and i.indisprimary
 where at.attrelid = '%s."%s"'::regclass
   and at.attnum > 0
+  and not at.attisdropped
 order by at.attnum;
 ''' % (schema_name, table_name)
 
@@ -639,7 +644,7 @@ order by at.attnum;
             else:
                 target_table = table_name
 
-            create_table = 'begin;\ncreate table %s."%s"(' % (
+            create_table = 'begin;\ncreate table %s.%s (' % (
                 set_target_schema, target_table,)
 
             # query the table column definition
@@ -651,6 +656,7 @@ order by at.attnum;
             has_zindex_sortkeys = False
             has_identity = False
             non_identity_columns = []
+            inserted_columns = []
             fks = []
             table_distkey = None
             table_sortkeys = []
@@ -681,12 +687,34 @@ order by at.attnum;
                 # fix datatypes from the description type to the create type
                 col_type = descr[col][1].replace('character varying', 'varchar').replace('without time zone', '')
 
+                if debug:
+                    comment('postgres replace data type is: ' + col_type)
+
+                # extract column type category
+                col_type_category = descr[col][7]
+
+                if str(col_type_category).upper() == 'A':
+                    col_type_array = True
+                else:
+                    col_type_array = False
+
+                if str(col_type).upper() == 'HSTORE':
+                    col_type_hstore = True
+                else:
+                    col_type_hstore = False
+
                 # check whether columns are too wide
-                if analyze_col_width and ("varchar" in col_type or "int" in col_type):
+                if analyze_col_width and ("varchar" in col_type or "int" in col_type) and not col_type_array:
                     new_col_type = reduce_column_length(col_type, descr[col][0], table_name)
                     if new_col_type != col_type:
                         col_type = new_col_type
                         encodings_modified = True
+
+                if debug:
+                    comment('postgres reduced data type is: ' + col_type)
+
+                if debug:
+                    comment('postgres converted data type is: ' + col_type)
 
                 # link in the existing distribution key, or set the new one
                 row_distkey = descr[col][3]
@@ -741,17 +769,31 @@ order by at.attnum;
                     ident_data = get_identity(default_or_identity)
                     if ident_data is None:
                         default_value = 'default %s' % default_or_identity
-                        non_identity_columns.append('"%s"' % col)
                     else:
                         default_value = 'identity (%s, %s)' % ident_data
                         has_identity = True
                 else:
                     default_value = ''
-                    non_identity_columns.append('"%s"' % col)
+
+                if col_type_array:
+                    non_identity_columns.append('array_to_json(%s)' % col)
+                elif col_type_hstore:
+                    non_identity_columns.append('hstore_to_json(%s)' % col)
+                else:
+                    non_identity_columns.append('%s' % col)
+
+                inserted_columns.append('%s' % col)
+
+                # map incompatible datatypes from the postgresql type to the redshift type
+                if col_type_array or col_type_hstore:
+                    col_type = 'varchar(65535)'
+                col_type = col_type.replace('jsonb', 'varchar(65535)').replace('json', 'varchar(65535)')
+                col_type = col_type.replace('text', 'varchar(65535)').replace('uuid', 'varchar(36)')
+                col_type = col_type.replace('integer', 'int')
 
                 # add the formatted column specification
-                encode_columns.extend(['"%s" %s %s encode %s %s'
-                                       % (col, col_type, default_value, compression, distkey)])
+                encode_columns.extend(['%s %s encode %s %s'
+                                       % (col, col_type, compression, distkey)])
 
             # abort if a new distkey was set but we couldn't find it in the set of all columns
             if new_dist_key is not None and table_distkey is None:
@@ -777,7 +819,7 @@ order by at.attnum;
                 # add all the column encoding statements on to the create table statement, suppressing the leading
                 # comma on the first one
                 for i, s in enumerate(encode_columns):
-                    create_table += '\n%s%s' % ('' if i == 0 else ',', s)
+                    create_table += '\n%s%s' % ('  ' if i == 0 else '  ,', s)
 
                 create_table = create_table + '\n)\n'
 
@@ -809,22 +851,24 @@ order by at.attnum;
                 statements.extend([get_primary_key(schema_name, set_target_schema, table_name, target_table)])
 
                 # set the table owner
-                statements.extend(['alter table %s."%s" owner to %s;' % (set_target_schema, target_table, owner)])
+                statements.extend(['alter table %s.%s owner to %s;' % (set_target_schema, target_table, owner)])
 
                 if table_comment is not None:
                     statements.extend(
-                        ['comment on table %s."%s" is \'%s\';' % (set_target_schema, target_table, table_comment)])
+                        ['comment on table %s.%s is \'%s\';' % (set_target_schema, target_table, table_comment)])
+
+                statements.extend([''])
 
                 # insert the old data into the new table
                 # if we have identity column(s), we can't insert data from them, so do selective insert
                 if has_identity or 1==1:
                     source_columns = ', '.join(non_identity_columns)
-                    mig_columns = '(\n' + source_columns + '\n)'
+                    mig_columns = '(\n  ' + ', '.join(inserted_columns) + '\n)'
                 else:
                     source_columns = '*'
                     mig_columns = ''
 
-                insert = 'insert into %s."%s" %s\nselect\n%s\nfrom %s."%s"' % (set_target_schema,
+                insert = 'insert into %s.%s %s\nselect\n  %s\nfrom %s.%s' % (set_target_schema,
                                                                                target_table,
                                                                                mig_columns,
                                                                                source_columns,
@@ -844,18 +888,18 @@ order by at.attnum;
                 if set_target_schema == schema_name:
                     # rename the old table to _$old or drop
                     if drop_old_data:
-                        drop = 'drop table %s."%s" cascade;' % (set_target_schema, table_name)
+                        drop = 'drop table %s.%s cascade;' % (set_target_schema, table_name)
                     else:
                         # the alter table statement for the current data will use the first 104 characters of the
                         # original table name, the current datetime as YYYYMMDD and a 10 digit random string
-                        drop = 'alter table %s."%s" rename to "%s_%s_%s_$old";' % (
+                        drop = 'alter table %s.%s rename to "%s_%s_%s_$old";' % (
                             set_target_schema, table_name, table_name[0:104], datetime.date.today().strftime("%Y%m%d"),
                             shortuuid.ShortUUID().random(length=10))
 
                     statements.extend([drop])
 
                     # rename the migrate table to the old table name
-                    rename = 'alter table %s."%s" rename to "%s";' % (set_target_schema, target_table, table_name)
+                    rename = 'alter table %s.%s rename to %s;' % (set_target_schema, target_table, table_name)
                     statements.extend([rename])
 
                 # add foreign keys
@@ -866,17 +910,17 @@ order by at.attnum;
                 if grants is not None and 1 == 0:
                     statements.extend(grants)
                 else:
-                    grant_command = 'grant references, trigger on table %s."%s" to datapipeline_app;' % (set_target_schema, table_name)
+                    grant_command = 'grant references, trigger on table %s.%s to datapipeline_app;' % (set_target_schema, table_name)
                     statements.extend([grant_command]);
-                    grant_command = 'grant select, insert, delete, update on table %s."%s" to datapipeline_app;' % (set_target_schema, table_name)
+                    grant_command = 'grant select, insert, delete, update on table %s.%s to datapipeline_app;' % (set_target_schema, table_name)
                     statements.extend([grant_command]);
-                    grant_command = 'grant all on table %s."%s" to group admin_group;' % (set_target_schema, table_name)
+                    grant_command = 'grant all on table %s.%s to group admin_group;' % (set_target_schema, table_name)
                     statements.extend([grant_command]);
-                    grant_command = 'grant select, insert, delete, update on table %s."%s" to group internalapps_rw;' % (set_target_schema, table_name)
+                    grant_command = 'grant select, insert, delete, update on table %s.%s to group internalapps_rw;' % (set_target_schema, table_name)
                     statements.extend([grant_command]);
-                    grant_command = 'grant select on table %s."%s" to group internalapps_ro;' % (set_target_schema, table_name)
+                    grant_command = 'grant select on table %s.%s to group internalapps_ro;' % (set_target_schema, table_name)
                     statements.extend([grant_command]);
-                    grant_command = 'grant select on table %s."%s" to group querywriters_ro;' % (set_target_schema, table_name)
+                    grant_command = 'grant select on table %s.%s to group querywriters_ro;' % (set_target_schema, table_name)
                     statements.extend([grant_command]);
 
                 statements.extend(['commit;'])
