@@ -644,8 +644,8 @@ order by at.attnum;
             else:
                 target_table = table_name
 
-            create_table = 'begin;\ncreate table %s.%s (' % (
-                set_target_schema, target_table,)
+            create_table = 'begin;\ndrop table if exists %s.%s;\ncreate table %s.%s (' % (
+                set_target_schema, target_table, set_target_schema, target_table)
 
             # query the table column definition
             descr = get_table_desc(schema_name, table_name)
@@ -789,11 +789,12 @@ order by at.attnum;
                     col_type = 'varchar(65535)'
                 col_type = col_type.replace('jsonb', 'varchar(65535)').replace('json', 'varchar(65535)')
                 col_type = col_type.replace('text', 'varchar(65535)').replace('uuid', 'varchar(36)')
+                col_type = col_type.replace('inet', 'varchar(15)')
                 col_type = col_type.replace('integer', 'int')
 
                 # add the formatted column specification
-                encode_columns.extend(['%s %s encode %s %s'
-                                       % (col, col_type, compression, distkey)])
+                encode_columns.extend(['%s %s encode %s'
+                                       % (col, col_type, compression)])
 
             # abort if a new distkey was set but we couldn't find it in the set of all columns
             if new_dist_key is not None and table_distkey is None:
@@ -862,7 +863,7 @@ order by at.attnum;
                 # insert the old data into the new table
                 # if we have identity column(s), we can't insert data from them, so do selective insert
                 if has_identity or 1==1:
-                    source_columns = ', '.join(non_identity_columns)
+                    source_columns = '\n  ,'.join(non_identity_columns)
                     mig_columns = '(\n  ' + ', '.join(inserted_columns) + '\n)'
                 else:
                     source_columns = '*'
