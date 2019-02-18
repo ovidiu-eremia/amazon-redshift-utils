@@ -639,8 +639,8 @@ order by at.attnum;
             else:
                 set_target_schema = target_schema
 
-            if set_target_schema == schema_name:
-                target_table = '%s_$mig' % table_name
+            if set_target_schema == schema_name or 1 == 1:
+                target_table = '%s_staging' % table_name
             else:
                 target_table = table_name
 
@@ -851,9 +851,6 @@ order by at.attnum;
                 # get the primary key statement
                 statements.extend([get_primary_key(schema_name, set_target_schema, table_name, target_table)])
 
-                # set the table owner
-                statements.extend(['alter table %s.%s owner to %s;' % (set_target_schema, target_table, owner)])
-
                 if table_comment is not None:
                     statements.extend(
                         ['comment on table %s.%s is \'%s\';' % (set_target_schema, target_table, table_comment)])
@@ -862,18 +859,21 @@ order by at.attnum;
 
                 # insert the old data into the new table
                 # if we have identity column(s), we can't insert data from them, so do selective insert
-                if has_identity or 1==1:
+                if has_identity or 1 == 1:
                     source_columns = '\n  ,'.join(non_identity_columns)
                     mig_columns = '(\n  ' + ', '.join(inserted_columns) + '\n)'
                 else:
                     source_columns = '*'
                     mig_columns = ''
 
+                if debug:
+                    print('aici %s' % (schema_name))
+
                 insert = 'insert into %s.%s %s\nselect\n  %s\nfrom %s.%s' % (set_target_schema,
                                                                                target_table,
                                                                                mig_columns,
                                                                                source_columns,
-                                                                               schema_name,
+                                                                               set_target_schema,
                                                                                table_name)
                 if len(table_sortkeys) > 0:
                     insert = "%s order by \"%s\"\n;" % (insert, ",".join(table_sortkeys).replace(',', '\",\"'))
@@ -886,7 +886,7 @@ order by at.attnum;
                 analyze = 'analyze %s."%s";' % (set_target_schema, target_table)
                 statements.extend([analyze])
 
-                if set_target_schema == schema_name:
+                if set_target_schema == schema_name or 1 == 1:
                     # rename the old table to _$old or drop
                     if drop_old_data:
                         drop = 'drop table %s.%s cascade;' % (set_target_schema, table_name)
@@ -902,6 +902,9 @@ order by at.attnum;
                     # rename the migrate table to the old table name
                     rename = 'alter table %s.%s rename to %s;' % (set_target_schema, target_table, table_name)
                     statements.extend([rename])
+                    # set the table owner
+                    statements.extend(['alter table %s.%s owner to %s;' % (set_target_schema, table_name, owner)])
+
 
                 # add foreign keys
                 fks = get_foreign_keys(schema_name, set_target_schema, table_name)
